@@ -35,3 +35,11 @@ npm run dev
 
 - Data persists in `apps/api/data/db.json`.
 - No authentication yet; the UI uses a seeded current user.
+
+## Production hosting
+
+- Frontend: Vercel (set Root Directory to `apps/web`).
+- API: Any Docker-capable host (Render/Fly/Railway). Set these env vars:
+  - `PORT=4000`
+  - `DATA_DIR=/data` (mount a persistent disk at `/data` on the host)
+  - `CORS_ORIGIN=https://your-vercel-domain` (comma-separated allowed origins)

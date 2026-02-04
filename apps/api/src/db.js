@@ -5,7 +5,8 @@ import { Low } from "lowdb";
 import { JSONFile } from "lowdb/node";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dataDir = path.join(__dirname, "..", "data");
+const dataDir =
+  process.env.DATA_DIR?.trim() || path.join(__dirname, "..", "data");
 const file = path.join(dataDir, "db.json");
 
 const adapter = new JSONFile(file);

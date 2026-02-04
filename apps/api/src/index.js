@@ -1,5 +1,7 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import { nanoid } from "nanoid";
 import { db, initDb, readDb } from "./db.js";
 import { seedIfEmpty } from "./seed.js";
@@ -7,7 +9,24 @@ import { seedIfEmpty } from "./seed.js";
 const app = express();
 const port = process.env.PORT || 4000;
 
-app.use(cors());
+const corsOrigin = process.env.CORS_ORIGIN?.split(",").map((origin) => origin.trim());
+app.use(
+  corsOrigin?.length
+    ? {
+        origin: corsOrigin,
+        credentials: true
+      }
+    : {}
+);
+app.use(helmet());
+app.use(
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false
+  })
+);
 app.use(express.json({ limit: "1mb" }));
 
 await initDb();
