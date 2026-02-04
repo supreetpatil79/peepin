@@ -1,4 +1,5 @@
 import { nanoid } from "nanoid";
+import bcrypt from "bcryptjs";
 import { db, readDb } from "./db.js";
 
 const now = () => new Date().toISOString();
@@ -21,7 +22,8 @@ export async function seedIfEmpty() {
       avatar: "https://i.pravatar.cc/150?img=32",
       location: "Seattle",
       lat: 47.6062,
-      lng: -122.3321
+      lng: -122.3321,
+      shareLocation: true
     },
     {
       id: "user_2",
@@ -33,7 +35,8 @@ export async function seedIfEmpty() {
       avatar: "https://i.pravatar.cc/150?img=45",
       location: "Miami",
       lat: 47.6095,
-      lng: -122.3362
+      lng: -122.3362,
+      shareLocation: true
     },
     {
       id: "user_3",
@@ -45,7 +48,8 @@ export async function seedIfEmpty() {
       avatar: "https://i.pravatar.cc/150?img=12",
       location: "Austin",
       lat: 47.6048,
-      lng: -122.329
+      lng: -122.329,
+      shareLocation: true
     },
     {
       id: "user_4",
@@ -57,7 +61,8 @@ export async function seedIfEmpty() {
       avatar: "https://i.pravatar.cc/150?img=5",
       location: "Portland",
       lat: 47.6136,
-      lng: -122.341
+      lng: -122.341,
+      shareLocation: true
     },
     {
       id: "user_5",
@@ -69,8 +74,18 @@ export async function seedIfEmpty() {
       avatar: "https://i.pravatar.cc/150?img=21",
       location: "Brooklyn",
       lat: 47.5944,
-      lng: -122.32
+      lng: -122.32,
+      shareLocation: true
     }
+  ];
+
+  const passwordHash = bcrypt.hashSync("peepin123", 10);
+  const accounts = [
+    { id: `acct_${nanoid(6)}`, userId: "user_1", email: "avery@peepin.com", passwordHash },
+    { id: `acct_${nanoid(6)}`, userId: "user_2", email: "mila@peepin.com", passwordHash },
+    { id: `acct_${nanoid(6)}`, userId: "user_3", email: "rohan@peepin.com", passwordHash },
+    { id: `acct_${nanoid(6)}`, userId: "user_4", email: "skylar@peepin.com", passwordHash },
+    { id: `acct_${nanoid(6)}`, userId: "user_5", email: "lena@peepin.com", passwordHash }
   ];
 
   const posts = [
@@ -415,6 +430,7 @@ export async function seedIfEmpty() {
   ];
 
   db.data.users = users;
+  db.data.accounts = accounts;
   db.data.posts = posts;
   db.data.connections = connections;
   db.data.messages = messages;
@@ -428,6 +444,7 @@ export async function seedIfEmpty() {
   db.data.skills = skills;
   db.data.endorsements = endorsements;
   db.data.recommendations = recommendations;
+  db.data.locations = [];
   db.data.meta.currentUserId = "user_1";
 
   await db.write();

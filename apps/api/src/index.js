@@ -1,5 +1,7 @@
 import express from "express";
 import cors from "cors";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { nanoid } from "nanoid";
@@ -11,12 +13,14 @@ const port = process.env.PORT || 4000;
 
 const corsOrigin = process.env.CORS_ORIGIN?.split(",").map((origin) => origin.trim());
 app.use(
-  corsOrigin?.length
-    ? {
-        origin: corsOrigin,
-        credentials: true
-      }
-    : {}
+  cors(
+    corsOrigin?.length
+      ? {
+          origin: corsOrigin,
+          credentials: true
+        }
+      : {}
+  )
 );
 app.use(helmet());
 app.use(
@@ -44,7 +48,23 @@ db.data.users.forEach((user, index) => {
     user.lng = baseLng - (index % 2) * 0.002 - index * 0.0004;
     patched = true;
   }
+
+  if (user.shareLocation == null) {
+    user.shareLocation = true;
+    patched = true;
+  }
 });
+
+if (db.data.accounts.length === 0 && db.data.users.length > 0) {
+  const passwordHash = bcrypt.hashSync("peepin123", 10);
+  db.data.accounts = db.data.users.map((user) => ({
+    id: `acct_${nanoid(6)}`,
+    userId: user.id,
+    email: `${user.handle.replace(/\./g, "")}@peepin.com`,
+    passwordHash
+  }));
+  patched = true;
+}
 
 db.data.posts.forEach((post) => {
   if (!post.commentItems) {
@@ -93,6 +113,46 @@ const hydratePost = (post) => ({
   author: getUserById(post.authorId)
 });
 
+const getAccountByEmail = (email) =>
+  db.data.accounts.find((account) => account.email === email);
+
+const jwtSecret = process.env.JWT_SECRET || "dev-secret";
+const signToken = (userId) =>
+  jwt.sign({ sub: userId }, jwtSecret, { expiresIn: "7d" });
+
+const authMiddleware = (req, res, next) => {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+
+  if (!token) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const payload = jwt.verify(token, jwtSecret);
+    req.userId = payload.sub;
+    return next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+};
+
+const toRadians = (value) => (value * Math.PI) / 180;
+const distanceInMeters = (a, b) => {
+  if (!a || !b) return null;
+  const R = 6371000;
+  const dLat = toRadians(b.lat - a.lat);
+  const dLng = toRadians(b.lng - a.lng);
+  const lat1 = toRadians(a.lat);
+  const lat2 = toRadians(b.lat);
+
+  const sinLat = Math.sin(dLat / 2);
+  const sinLng = Math.sin(dLng / 2);
+  const h = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng;
+  const c = 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  return R * c;
+};
+
 app.get("/api/health", async (req, res) => {
   return res.json({ ok: true });
 });
@@ -105,13 +165,92 @@ app.get("/api/modes", async (req, res) => {
   ]);
 });
 
-app.get("/api/me", async (req, res) => {
+app.post("/api/auth/register", async (req, res) => {
+  const { name, handle, email, password, mode } = req.body;
+
+  if (!name || !handle || !email || !password) {
+    return res
+      .status(400)
+      .json({ error: "name, handle, email, and password are required" });
+  }
+
+  await readDb();
+
+  if (getAccountByEmail(email)) {
+    return res.status(409).json({ error: "Email already in use" });
+  }
+
+  if (db.data.users.some((user) => user.handle === handle)) {
+    return res.status(409).json({ error: "Handle already in use" });
+  }
+
+  const userId = `user_${nanoid(6)}`;
+  const newUser = {
+    id: userId,
+    name,
+    handle,
+    title: "",
+    bio: "",
+    mode: mode || "pro",
+    avatar: "https://i.pravatar.cc/150?img=16",
+    location: "",
+    lat: null,
+    lng: null,
+    shareLocation: false
+  };
+
+  const newAccount = {
+    id: `acct_${nanoid(6)}`,
+    userId,
+    email,
+    passwordHash: bcrypt.hashSync(password, 10)
+  };
+
+  db.data.users.push(newUser);
+  db.data.accounts.push(newAccount);
+  await db.write();
+
+  const token = signToken(userId);
+  return res.status(201).json({ token, user: newUser });
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ error: "email and password are required" });
+  }
+
+  await readDb();
+  const account = getAccountByEmail(email);
+
+  if (!account || !bcrypt.compareSync(password, account.passwordHash)) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+
+  const user = getUserById(account.userId);
+  const token = signToken(account.userId);
+  return res.json({ token, user });
+});
+
+app.get("/api/auth/me", authMiddleware, async (req, res) => {
+  await readDb();
+  const user = getUserById(req.userId);
+
+  if (!user) {
+    return res.status(404).json({ error: "User not found" });
+  }
+
+  return res.json(user);
+});
+
+app.get("/api/me", authMiddleware, async (req, res) => {
   await readDb();
   const currentUser = getUserById(db.data.meta.currentUserId);
   return res.json(currentUser);
 });
 
-app.post("/api/me", async (req, res) => {
+app.post("/api/me", authMiddleware, async (req, res) => {
   const { userId } = req.body;
   await readDb();
   const user = getUserById(userId);
@@ -125,7 +264,7 @@ app.post("/api/me", async (req, res) => {
   return res.json(user);
 });
 
-app.get("/api/users", async (req, res) => {
+app.get("/api/users", authMiddleware, async (req, res) => {
   await readDb();
   const { mode, q } = req.query;
   let users = db.data.users;
@@ -146,18 +285,13 @@ app.get("/api/users", async (req, res) => {
   return res.json(users);
 });
 
-app.get("/api/companies", async (req, res) => {
+app.get("/api/companies", authMiddleware, async (req, res) => {
   await readDb();
   return res.json(db.data.companies);
 });
 
-app.post("/api/companies/:id/follow", async (req, res) => {
+app.post("/api/companies/:id/follow", authMiddleware, async (req, res) => {
   const { id } = req.params;
-  const { userId } = req.body;
-
-  if (!userId) {
-    return res.status(400).json({ error: "userId is required" });
-  }
 
   await readDb();
   const company = db.data.companies.find((item) => item.id === id);
@@ -166,6 +300,7 @@ app.post("/api/companies/:id/follow", async (req, res) => {
     return res.status(404).json({ error: "Company not found" });
   }
 
+  const userId = req.userId;
   company.followersBy ||= [];
   if (!company.followersBy.includes(userId)) {
     company.followersBy.push(userId);
@@ -176,7 +311,7 @@ app.post("/api/companies/:id/follow", async (req, res) => {
   return res.json(company);
 });
 
-app.get("/api/jobs", async (req, res) => {
+app.get("/api/jobs", authMiddleware, async (req, res) => {
   await readDb();
   const { companyId, q } = req.query;
   let jobs = db.data.jobs;
@@ -202,13 +337,8 @@ app.get("/api/jobs", async (req, res) => {
   return res.json(jobs);
 });
 
-app.post("/api/jobs/:id/apply", async (req, res) => {
+app.post("/api/jobs/:id/apply", authMiddleware, async (req, res) => {
   const { id } = req.params;
-  const { userId } = req.body;
-
-  if (!userId) {
-    return res.status(400).json({ error: "userId is required" });
-  }
 
   await readDb();
   const job = db.data.jobs.find((item) => item.id === id);
@@ -217,6 +347,7 @@ app.post("/api/jobs/:id/apply", async (req, res) => {
     return res.status(404).json({ error: "Job not found" });
   }
 
+  const userId = req.userId;
   job.appliedBy ||= [];
   if (!job.appliedBy.includes(userId)) {
     job.appliedBy.push(userId);
@@ -230,7 +361,7 @@ app.post("/api/jobs/:id/apply", async (req, res) => {
   });
 });
 
-app.get("/api/stories", async (req, res) => {
+app.get("/api/stories", authMiddleware, async (req, res) => {
   await readDb();
   const { mode } = req.query;
   let stories = db.data.stories;
@@ -247,7 +378,7 @@ app.get("/api/stories", async (req, res) => {
   return res.json(stories);
 });
 
-app.get("/api/reels", async (req, res) => {
+app.get("/api/reels", authMiddleware, async (req, res) => {
   await readDb();
   const { mode } = req.query;
   let reels = db.data.reels;
@@ -264,20 +395,18 @@ app.get("/api/reels", async (req, res) => {
   return res.json(reels);
 });
 
-app.get("/api/notifications", async (req, res) => {
+app.get("/api/notifications", authMiddleware, async (req, res) => {
   await readDb();
-  const { userId } = req.query;
+  const userId = req.userId;
   let notes = db.data.notifications;
 
-  if (userId) {
-    notes = notes.filter((note) => note.userId === userId);
-  }
+  notes = notes.filter((note) => note.userId === userId);
 
   notes = notes.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   return res.json(notes);
 });
 
-app.post("/api/notifications/:id/read", async (req, res) => {
+app.post("/api/notifications/:id/read", authMiddleware, async (req, res) => {
   const { id } = req.params;
   await readDb();
   const note = db.data.notifications.find((item) => item.id === id);
@@ -291,7 +420,7 @@ app.post("/api/notifications/:id/read", async (req, res) => {
   return res.json(note);
 });
 
-app.get("/api/groups", async (req, res) => {
+app.get("/api/groups", authMiddleware, async (req, res) => {
   await readDb();
   const { mode, userId } = req.query;
   let groups = db.data.groups;
@@ -312,16 +441,17 @@ app.get("/api/groups", async (req, res) => {
   return res.json(groups);
 });
 
-app.post("/api/groups", async (req, res) => {
-  const { name, description, mode, creatorId } = req.body;
+app.post("/api/groups", authMiddleware, async (req, res) => {
+  const { name, description, mode } = req.body;
 
-  if (!name || !mode || !creatorId) {
+  if (!name || !mode) {
     return res
       .status(400)
-      .json({ error: "name, mode, and creatorId are required" });
+      .json({ error: "name and mode are required" });
   }
 
   await readDb();
+  const creatorId = req.userId;
 
   const newGroup = {
     id: `group_${nanoid(6)}`,
@@ -339,13 +469,8 @@ app.post("/api/groups", async (req, res) => {
   return res.status(201).json(newGroup);
 });
 
-app.post("/api/groups/:id/join", async (req, res) => {
+app.post("/api/groups/:id/join", authMiddleware, async (req, res) => {
   const { id } = req.params;
-  const { userId } = req.body;
-
-  if (!userId) {
-    return res.status(400).json({ error: "userId is required" });
-  }
 
   await readDb();
   const group = db.data.groups.find((item) => item.id === id);
@@ -354,6 +479,7 @@ app.post("/api/groups/:id/join", async (req, res) => {
     return res.status(404).json({ error: "Group not found" });
   }
 
+  const userId = req.userId;
   group.members ||= [];
   if (!group.members.includes(userId)) {
     group.members.push(userId);
@@ -363,7 +489,7 @@ app.post("/api/groups/:id/join", async (req, res) => {
   return res.json(group);
 });
 
-app.get("/api/events", async (req, res) => {
+app.get("/api/events", authMiddleware, async (req, res) => {
   await readDb();
   const { mode } = req.query;
   let events = db.data.events;
@@ -375,7 +501,7 @@ app.get("/api/events", async (req, res) => {
   return res.json(events);
 });
 
-app.post("/api/events", async (req, res) => {
+app.post("/api/events", authMiddleware, async (req, res) => {
   const { title, detail, mode } = req.body;
 
   if (!title || !detail || !mode) {
@@ -396,7 +522,7 @@ app.post("/api/events", async (req, res) => {
   return res.status(201).json(newEvent);
 });
 
-app.get("/api/skills", async (req, res) => {
+app.get("/api/skills", authMiddleware, async (req, res) => {
   await readDb();
   const { userId } = req.query;
   let skills = db.data.skills;
@@ -408,7 +534,7 @@ app.get("/api/skills", async (req, res) => {
   return res.json(skills);
 });
 
-app.get("/api/endorsements", async (req, res) => {
+app.get("/api/endorsements", authMiddleware, async (req, res) => {
   await readDb();
   const { userId } = req.query;
   let endorsements = db.data.endorsements;
@@ -425,7 +551,7 @@ app.get("/api/endorsements", async (req, res) => {
   return res.json(endorsements);
 });
 
-app.get("/api/recommendations", async (req, res) => {
+app.get("/api/recommendations", authMiddleware, async (req, res) => {
   await readDb();
   const { userId } = req.query;
   let recommendations = db.data.recommendations;
@@ -442,7 +568,7 @@ app.get("/api/recommendations", async (req, res) => {
   return res.json(recommendations);
 });
 
-app.post("/api/users", async (req, res) => {
+app.post("/api/users", authMiddleware, async (req, res) => {
   const { name, handle, title, bio, mode, avatar, location } = req.body;
 
   if (!name || !handle || !mode) {
@@ -468,7 +594,7 @@ app.post("/api/users", async (req, res) => {
   return res.status(201).json(newUser);
 });
 
-app.get("/api/feed", async (req, res) => {
+app.get("/api/feed", authMiddleware, async (req, res) => {
   await readDb();
   const { mode } = req.query;
 
@@ -485,16 +611,15 @@ app.get("/api/feed", async (req, res) => {
   return res.json(posts);
 });
 
-app.post("/api/posts", async (req, res) => {
-  const { authorId, mode, content, link, image } = req.body;
+app.post("/api/posts", authMiddleware, async (req, res) => {
+  const { mode, content, link, image } = req.body;
 
-  if (!authorId || !mode || !content) {
-    return res
-      .status(400)
-      .json({ error: "authorId, mode, and content are required" });
+  if (!mode || !content) {
+    return res.status(400).json({ error: "mode and content are required" });
   }
 
   await readDb();
+  const authorId = req.userId;
 
   const newPost = {
     id: `post_${nanoid(6)}`,
@@ -516,7 +641,7 @@ app.post("/api/posts", async (req, res) => {
   return res.status(201).json(hydratePost(newPost));
 });
 
-app.post("/api/posts/:id/react", async (req, res) => {
+app.post("/api/posts/:id/react", authMiddleware, async (req, res) => {
   const { id } = req.params;
   await readDb();
   const post = db.data.posts.find((item) => item.id === id);
@@ -530,7 +655,7 @@ app.post("/api/posts/:id/react", async (req, res) => {
   return res.json(hydratePost(post));
 });
 
-app.post("/api/posts/:id/save", async (req, res) => {
+app.post("/api/posts/:id/save", authMiddleware, async (req, res) => {
   const { id } = req.params;
   await readDb();
   const post = db.data.posts.find((item) => item.id === id);
@@ -544,12 +669,12 @@ app.post("/api/posts/:id/save", async (req, res) => {
   return res.json(hydratePost(post));
 });
 
-app.post("/api/posts/:id/comment", async (req, res) => {
+app.post("/api/posts/:id/comment", authMiddleware, async (req, res) => {
   const { id } = req.params;
-  const { authorId, body } = req.body;
+  const { body } = req.body;
 
-  if (!authorId || !body) {
-    return res.status(400).json({ error: "authorId and body are required" });
+  if (!body) {
+    return res.status(400).json({ error: "body is required" });
   }
 
   await readDb();
@@ -562,7 +687,7 @@ app.post("/api/posts/:id/comment", async (req, res) => {
   post.commentItems ||= [];
   post.commentItems.push({
     id: `c_${nanoid(6)}`,
-    authorId,
+    authorId: req.userId,
     body,
     createdAt: new Date().toISOString()
   });
@@ -571,14 +696,12 @@ app.post("/api/posts/:id/comment", async (req, res) => {
   return res.json(hydratePost(post));
 });
 
-app.get("/api/connections", async (req, res) => {
+app.get("/api/connections", authMiddleware, async (req, res) => {
   await readDb();
-  const { userId } = req.query;
+  const userId = req.userId;
   let connections = db.data.connections;
 
-  if (userId) {
-    connections = connections.filter((con) => con.fromId === userId);
-  }
+  connections = connections.filter((con) => con.fromId === userId);
 
   const result = connections.map((con) => ({
     ...con,
@@ -588,14 +711,15 @@ app.get("/api/connections", async (req, res) => {
   return res.json(result);
 });
 
-app.post("/api/connections", async (req, res) => {
-  const { fromId, toId, status } = req.body;
+app.post("/api/connections", authMiddleware, async (req, res) => {
+  const { toId, status } = req.body;
 
-  if (!fromId || !toId) {
-    return res.status(400).json({ error: "fromId and toId are required" });
+  if (!toId) {
+    return res.status(400).json({ error: "toId is required" });
   }
 
   await readDb();
+  const fromId = req.userId;
 
   const existing = db.data.connections.find(
     (con) => con.fromId === fromId && con.toId === toId
@@ -618,12 +742,17 @@ app.post("/api/connections", async (req, res) => {
   return res.status(201).json(newConnection);
 });
 
-app.get("/api/messages", async (req, res) => {
+app.get("/api/messages", authMiddleware, async (req, res) => {
   await readDb();
-  const { userId, groupId } = req.query;
+  const { groupId } = req.query;
+  const userId = req.userId;
   let messages = db.data.messages;
 
   if (groupId) {
+    const group = db.data.groups.find((item) => item.id === groupId);
+    if (!group || !group.members?.includes(userId)) {
+      return res.status(403).json({ error: "Not a member of this group" });
+    }
     messages = messages.filter((msg) => msg.groupId === groupId);
   } else if (userId) {
     const memberGroupIds = db.data.groups
@@ -652,16 +781,24 @@ app.get("/api/messages", async (req, res) => {
   return res.json(messages);
 });
 
-app.post("/api/messages", async (req, res) => {
-  const { fromId, toId, groupId, body } = req.body;
+app.post("/api/messages", authMiddleware, async (req, res) => {
+  const { toId, groupId, body } = req.body;
 
-  if (!fromId || !body || (!toId && !groupId)) {
+  if (!body || (!toId && !groupId)) {
     return res
       .status(400)
-      .json({ error: "fromId, body, and toId or groupId are required" });
+      .json({ error: "body and toId or groupId are required" });
   }
 
   await readDb();
+  const fromId = req.userId;
+
+  if (groupId) {
+    const group = db.data.groups.find((item) => item.id === groupId);
+    if (!group || !group.members?.includes(fromId)) {
+      return res.status(403).json({ error: "Not a member of this group" });
+    }
+  }
 
   const newMessage = {
     id: `msg_${nanoid(6)}`,
@@ -685,11 +822,117 @@ app.post("/api/messages", async (req, res) => {
   });
 });
 
-app.post("/api/rooms", async (req, res) => {
-  const { title, mode, hostId } = req.body;
+app.post("/api/location", authMiddleware, async (req, res) => {
+  const { lat, lng, accuracy, precision, share } = req.body;
 
-  if (!title || !mode || !hostId) {
-    return res.status(400).json({ error: "title, mode, and hostId are required" });
+  await readDb();
+  const user = getUserById(req.userId);
+
+  if (!user) {
+    return res.status(404).json({ error: "User not found" });
+  }
+
+  if (share === false) {
+    user.shareLocation = false;
+    db.data.locations = db.data.locations.filter((loc) => loc.userId !== req.userId);
+    await db.write();
+    return res.json({ ok: true, disabled: true });
+  }
+
+  if (lat == null || lng == null) {
+    return res.status(400).json({ error: "lat and lng are required" });
+  }
+
+  if (typeof share === "boolean") {
+    user.shareLocation = share;
+  } else {
+    user.shareLocation = true;
+  }
+
+  const updatedAt = new Date().toISOString();
+  const existing = db.data.locations.find((loc) => loc.userId === req.userId);
+
+  if (existing) {
+    existing.lat = Number(lat);
+    existing.lng = Number(lng);
+    existing.accuracy = accuracy ?? null;
+    existing.precision = Boolean(precision);
+    existing.updatedAt = updatedAt;
+  } else {
+    db.data.locations.push({
+      userId: req.userId,
+      lat: Number(lat),
+      lng: Number(lng),
+      accuracy: accuracy ?? null,
+      precision: Boolean(precision),
+      updatedAt
+    });
+  }
+
+  await db.write();
+  return res.json({ ok: true, updatedAt });
+});
+
+app.get("/api/nearby", authMiddleware, async (req, res) => {
+  await readDb();
+  const userId = req.userId;
+  const radius = Number(req.query.radius) || 2000;
+  const now = Date.now();
+
+  db.data.locations = db.data.locations.filter(
+    (loc) => now - new Date(loc.updatedAt).getTime() < 10 * 60 * 1000
+  );
+
+  const baseLat = req.query.lat ? Number(req.query.lat) : null;
+  const baseLng = req.query.lng ? Number(req.query.lng) : null;
+  const base =
+    baseLat != null && baseLng != null
+      ? { lat: baseLat, lng: baseLng }
+      : db.data.locations.find((loc) => loc.userId === userId);
+
+  if (!base) {
+    return res.status(400).json({ error: "Location unavailable" });
+  }
+
+  const results = db.data.locations
+    .filter((loc) => loc.userId !== userId)
+    .map((loc) => {
+      const user = getUserById(loc.userId);
+      if (!user || !user.shareLocation) return null;
+
+      const distance = distanceInMeters(base, { lat: loc.lat, lng: loc.lng });
+      if (distance == null) return null;
+
+      const lastSeen = new Date(loc.updatedAt).getTime();
+      const isRecent = now - lastSeen < 60 * 1000;
+      const status = distance <= radius ? "nearby" : isRecent ? "recent" : null;
+
+      if (!status) return null;
+
+      return {
+        user,
+        distance,
+        status,
+        lastSeen: loc.updatedAt
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      if (a.status === b.status) {
+        return a.distance - b.distance;
+      }
+      return a.status === "nearby" ? -1 : 1;
+    });
+
+  await db.write();
+  return res.json(results);
+});
+
+app.post("/api/rooms", authMiddleware, async (req, res) => {
+  const { title, mode } = req.body;
+
+  if (!title || !mode) {
+    return res.status(400).json({ error: "title and mode are required" });
   }
 
   await readDb();
@@ -697,7 +940,7 @@ app.post("/api/rooms", async (req, res) => {
     id: `room_${nanoid(6)}`,
     title,
     mode,
-    hostId,
+    hostId: req.userId,
     createdAt: new Date().toISOString()
   };
 
@@ -707,17 +950,17 @@ app.post("/api/rooms", async (req, res) => {
   return res.status(201).json(newRoom);
 });
 
-app.post("/api/invites", async (req, res) => {
-  const { fromId, target } = req.body;
+app.post("/api/invites", authMiddleware, async (req, res) => {
+  const { target } = req.body;
 
-  if (!fromId || !target) {
-    return res.status(400).json({ error: "fromId and target are required" });
+  if (!target) {
+    return res.status(400).json({ error: "target is required" });
   }
 
   await readDb();
   const invite = {
     id: `invite_${nanoid(6)}`,
-    fromId,
+    fromId: req.userId,
     target,
     code: nanoid(8),
     createdAt: new Date().toISOString()
@@ -729,7 +972,7 @@ app.post("/api/invites", async (req, res) => {
   return res.status(201).json(invite);
 });
 
-app.get("/api/stats", async (req, res) => {
+app.get("/api/stats", authMiddleware, async (req, res) => {
   await readDb();
   return res.json({
     users: db.data.users.length,

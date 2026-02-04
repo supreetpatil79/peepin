@@ -1,7 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
-const CURRENT_USER_ID = "user_1";
 
 const themes = {
   pro: {
@@ -52,12 +51,6 @@ const navItems = [
   { id: "notifications", label: "Notifications" }
 ];
 
-const demoLocations = [
-  { label: "Downtown", lat: 47.6062, lng: -122.3321 },
-  { label: "Capitol Hill", lat: 47.6231, lng: -122.3206 },
-  { label: "Airport", lat: 47.4489, lng: -122.3094 }
-];
-
 const modePrompts = {
   pro: "Share a launch, a lesson, or a role you are hiring for",
   social: "Drop a moment, a photo, or a vibe update",
@@ -84,8 +77,9 @@ const formatDateTime = (iso) =>
     minute: "2-digit"
   });
 
-const formatLastSeen = (timestamp) => {
-  const diff = Date.now() - timestamp;
+const formatLastSeen = (iso) => {
+  if (!iso) return "";
+  const diff = Date.now() - new Date(iso).getTime();
   if (diff < 60000) {
     const seconds = Math.max(1, Math.floor(diff / 1000));
     return `${seconds}s ago`;
@@ -97,23 +91,6 @@ const formatLastSeen = (timestamp) => {
 const buildShareLink = (path = "") => {
   if (typeof window === "undefined") return "";
   return `${window.location.origin}${path}`;
-};
-
-const toRadians = (value) => (value * Math.PI) / 180;
-
-const distanceInMeters = (a, b) => {
-  if (!a || !b) return null;
-  const R = 6371000;
-  const dLat = toRadians(b.lat - a.lat);
-  const dLng = toRadians(b.lng - a.lng);
-  const lat1 = toRadians(a.lat);
-  const lat2 = toRadians(b.lat);
-
-  const sinLat = Math.sin(dLat / 2);
-  const sinLng = Math.sin(dLng / 2);
-  const h = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng;
-  const c = 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
-  return R * c;
 };
 
 const hashCode = (value) =>
@@ -158,17 +135,29 @@ export default function App() {
   const [modal, setModal] = useState(null);
   const [modalForm, setModalForm] = useState({});
   const [toast, setToast] = useState(null);
+  const [auth, setAuth] = useState(() => {
+    const saved = localStorage.getItem("peepin_auth");
+    return saved ? JSON.parse(saved) : null;
+  });
+  const [authView, setAuthView] = useState("login");
+  const [authForm, setAuthForm] = useState({
+    name: "",
+    handle: "",
+    email: "",
+    password: "",
+    mode: "pro"
+  });
+  const [authError, setAuthError] = useState("");
   const [locationEnabled, setLocationEnabled] = useState(false);
-  const [useDemoLocation, setUseDemoLocation] = useState(true);
   const [precision, setPrecision] = useState(false);
   const [location, setLocation] = useState(null);
   const [locationError, setLocationError] = useState("");
-  const [demoIndex, setDemoIndex] = useState(0);
   const [nearbyProfiles, setNearbyProfiles] = useState([]);
   const [tick, setTick] = useState(0);
-  const proximityRef = useRef(new Map());
   const composerRef = useRef(null);
   const toastTimer = useRef(null);
+
+  const userId = auth?.user?.id;
 
   const theme = themes[mode];
 
@@ -184,6 +173,35 @@ export default function App() {
       "--hero": theme.hero
     }),
     [theme]
+  );
+
+  const apiFetch = useCallback(
+    async (path, options = {}) => {
+      const headers = {
+        ...(options.headers || {})
+      };
+
+      if (!headers["Content-Type"] && options.body) {
+        headers["Content-Type"] = "application/json";
+      }
+
+      if (auth?.token) {
+        headers.Authorization = `Bearer ${auth.token}`;
+      }
+
+      const res = await fetch(`${API_URL}${path}`, {
+        ...options,
+        headers
+      });
+
+      if (res.status === 401) {
+        setAuth(null);
+        localStorage.removeItem("peepin_auth");
+      }
+
+      return res;
+    },
+    [auth]
   );
 
   const showToast = (message) => {
@@ -253,85 +271,55 @@ export default function App() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [locationEnabled, precision]);
 
-  const demoLocation = demoLocations[demoIndex];
+  useEffect(() => {
+    if (me?.shareLocation == null) return;
+    setLocationEnabled(Boolean(me.shareLocation));
+  }, [me?.shareLocation]);
 
-  const baseLocation = useMemo(() => {
-    if (useDemoLocation || !location) return demoLocation;
-    return location;
-  }, [useDemoLocation, location, demoLocation]);
-
-  const effectiveLocation = useMemo(() => {
-    if (!baseLocation) return null;
-    if (precision) return baseLocation;
-
-    const jitter = useDemoLocation ? 0.004 : 0.002;
-    return {
-      ...baseLocation,
-      lat: baseLocation.lat + (Math.random() - 0.5) * jitter,
-      lng: baseLocation.lng + (Math.random() - 0.5) * jitter
-    };
-  }, [baseLocation, precision, useDemoLocation, tick]);
-
-  const visibilityRadius = precision ? 2000 : 4500;
+  const visibilityRadius = precision ? 800 : 2500;
 
   useEffect(() => {
-    if (!effectiveLocation || users.length === 0) {
+    if (!locationEnabled || !location || !userId) return;
+
+    const sendLocation = async () => {
+      await apiFetch("/api/location", {
+        method: "POST",
+        body: JSON.stringify({
+          lat: location.lat,
+          lng: location.lng,
+          accuracy: location.accuracy,
+          precision,
+          share: locationEnabled
+        })
+      });
+    };
+
+    sendLocation();
+    const interval = setInterval(sendLocation, 15000);
+    return () => clearInterval(interval);
+  }, [apiFetch, location, locationEnabled, precision, userId]);
+
+  useEffect(() => {
+    if (!locationEnabled || !location || !userId) {
       setNearbyProfiles([]);
       return;
     }
 
-    const now = Date.now();
-    const nextMap = new Map(proximityRef.current);
-    const validIds = new Set();
-
-    users.forEach((user) => {
-      if (user.id === CURRENT_USER_ID || user.lat == null || user.lng == null) return;
-      validIds.add(user.id);
-
-      const distance = distanceInMeters(effectiveLocation, {
-        lat: user.lat,
-        lng: user.lng
-      });
-
-      if (distance == null) return;
-
-      const within = distance <= visibilityRadius;
-      const existing = nextMap.get(user.id);
-
-      if (within) {
-        nextMap.set(user.id, {
-          user,
-          distance,
-          lastSeen: now,
-          status: "nearby"
-        });
-      } else if (existing && now - existing.lastSeen < 60000) {
-        nextMap.set(user.id, {
-          ...existing,
-          distance,
-          status: "recent"
-        });
-      } else {
-        nextMap.delete(user.id);
+    const fetchNearby = async () => {
+      const res = await apiFetch(
+        `/api/nearby?radius=${visibilityRadius}&lat=${location.lat}&lng=${location.lng}`
+      );
+      if (!res.ok) {
+        return;
       }
-    });
+      const data = await res.json();
+      setNearbyProfiles(data);
+    };
 
-    Array.from(nextMap.keys()).forEach((id) => {
-      if (!validIds.has(id)) {
-        nextMap.delete(id);
-      }
-    });
-
-    proximityRef.current = nextMap;
-    const sorted = Array.from(nextMap.values()).sort((a, b) => {
-      if (a.status === b.status) {
-        return a.distance - b.distance;
-      }
-      return a.status === "nearby" ? -1 : 1;
-    });
-
-    setNearbyProfiles(sorted);
-  }, [users, effectiveLocation, visibilityRadius, tick]);
+    fetchNearby();
+    const interval = setInterval(fetchNearby, 10000);
+    return () => clearInterval(interval);
+  }, [apiFetch, location, locationEnabled, userId, visibilityRadius, tick]);
 
   const nearbyCount = useMemo(
     () => nearbyProfiles.filter((profile) => profile.status === "nearby").length,
@@ -339,17 +327,31 @@ export default function App() {
   );
 
   const locationStatus = useMemo(() => {
+    if (!locationEnabled) return "Location sharing off";
     if (locationError) return locationError;
-    if (useDemoLocation) return `Demo: ${demoLocation.label}`;
-    if (!locationEnabled) return "Location off";
     if (location?.accuracy) return `Accuracy ~${Math.round(location.accuracy)}m`;
     return "Locating...";
-  }, [locationError, useDemoLocation, demoLocation, locationEnabled, location]);
+  }, [locationError, locationEnabled, location]);
+
+  useEffect(() => {
+    if (!auth?.token) return;
+
+    const verify = async () => {
+      const res = await apiFetch("/api/auth/me");
+      if (!res.ok) return;
+      const data = await res.json();
+      setAuth((prev) => (prev ? { ...prev, user: data } : prev));
+      setMe(data);
+    };
+
+    verify();
+  }, [apiFetch, auth?.token]);
 
   useEffect(() => {
     let active = true;
 
     const load = async () => {
+      if (!auth?.token) return;
       setLoading(true);
       setError("");
 
@@ -372,22 +374,22 @@ export default function App() {
           endorsementsRes,
           recommendationsRes
         ] = await Promise.all([
-          fetch(`${API_URL}/api/feed?mode=${mode}`),
-          fetch(`${API_URL}/api/me`),
-          fetch(`${API_URL}/api/users?mode=${mode}`),
-          fetch(`${API_URL}/api/connections?userId=${CURRENT_USER_ID}`),
-          fetch(`${API_URL}/api/messages?userId=${CURRENT_USER_ID}`),
-          fetch(`${API_URL}/api/stats`),
-          fetch(`${API_URL}/api/stories?mode=${mode}`),
-          fetch(`${API_URL}/api/reels?mode=${mode}`),
-          fetch(`${API_URL}/api/jobs`),
-          fetch(`${API_URL}/api/companies`),
-          fetch(`${API_URL}/api/notifications?userId=${CURRENT_USER_ID}`),
-          fetch(`${API_URL}/api/groups?mode=${mode}`),
-          fetch(`${API_URL}/api/events?mode=${mode}`),
-          fetch(`${API_URL}/api/skills?userId=${CURRENT_USER_ID}`),
-          fetch(`${API_URL}/api/endorsements?userId=${CURRENT_USER_ID}`),
-          fetch(`${API_URL}/api/recommendations?userId=${CURRENT_USER_ID}`)
+          apiFetch(`/api/feed?mode=${mode}`),
+          apiFetch("/api/auth/me"),
+          apiFetch(`/api/users?mode=${mode}`),
+          apiFetch("/api/connections"),
+          apiFetch("/api/messages"),
+          apiFetch("/api/stats"),
+          apiFetch(`/api/stories?mode=${mode}`),
+          apiFetch(`/api/reels?mode=${mode}`),
+          apiFetch("/api/jobs"),
+          apiFetch("/api/companies"),
+          apiFetch("/api/notifications"),
+          apiFetch(`/api/groups?mode=${mode}`),
+          apiFetch(`/api/events?mode=${mode}`),
+          apiFetch(`/api/skills?userId=${userId}`),
+          apiFetch(`/api/endorsements?userId=${userId}`),
+          apiFetch(`/api/recommendations?userId=${userId}`)
         ]);
 
         if (!active) return;
@@ -460,7 +462,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [mode]);
+  }, [apiFetch, auth?.token, mode, userId]);
 
   const connectedIds = useMemo(
     () => new Set(connections.map((con) => con.toId)),
@@ -468,9 +470,8 @@ export default function App() {
   );
 
   const suggestions = useMemo(
-    () =>
-      users.filter((user) => user.id !== CURRENT_USER_ID && !connectedIds.has(user.id)),
-    [users, connectedIds]
+    () => users.filter((user) => user.id !== userId && !connectedIds.has(user.id)),
+    [users, connectedIds, userId]
   );
 
   const endorsementCounts = useMemo(() => {
@@ -487,8 +488,8 @@ export default function App() {
     messages
       .filter((msg) => !msg.groupId)
       .forEach((msg) => {
-        const otherId = msg.fromId === CURRENT_USER_ID ? msg.toId : msg.fromId;
-        const otherUser = msg.fromId === CURRENT_USER_ID ? msg.to : msg.from;
+        const otherId = msg.fromId === userId ? msg.toId : msg.fromId;
+        const otherUser = msg.fromId === userId ? msg.to : msg.from;
         if (!otherId || !otherUser) return;
 
         const existing = map.get(otherId);
@@ -507,7 +508,7 @@ export default function App() {
     return Array.from(map.values()).sort(
       (a, b) => new Date(b.lastMessage.createdAt) - new Date(a.lastMessage.createdAt)
     );
-  }, [messages]);
+  }, [messages, userId]);
 
   const groupThreads = useMemo(() => {
     return groups.map((group) => {
@@ -539,11 +540,11 @@ export default function App() {
       .filter(
         (msg) =>
           !msg.groupId &&
-          ((msg.fromId === CURRENT_USER_ID && msg.toId === activeThread.id) ||
-            (msg.toId === CURRENT_USER_ID && msg.fromId === activeThread.id))
+          ((msg.fromId === userId && msg.toId === activeThread.id) ||
+            (msg.toId === userId && msg.fromId === activeThread.id))
       )
       .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-  }, [activeThread, messages]);
+  }, [activeThread, messages, userId]);
 
   useEffect(() => {
     if (!activeThread) {
@@ -563,11 +564,9 @@ export default function App() {
     if (!composer.content.trim()) return;
 
     try {
-      const res = await fetch(`${API_URL}/api/posts`, {
+      const res = await apiFetch("/api/posts", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          authorId: CURRENT_USER_ID,
           mode,
           content: composer.content,
           link: composer.link,
@@ -586,10 +585,9 @@ export default function App() {
 
   const handleConnect = async (targetId) => {
     try {
-      const res = await fetch(`${API_URL}/api/connections`, {
+      const res = await apiFetch("/api/connections", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fromId: CURRENT_USER_ID, toId: targetId })
+        body: JSON.stringify({ toId: targetId })
       });
 
       const newConnection = await res.json();
@@ -605,7 +603,6 @@ export default function App() {
 
     try {
       const payload = {
-        fromId: CURRENT_USER_ID,
         body: messageDraft
       };
 
@@ -615,9 +612,8 @@ export default function App() {
         payload.toId = activeThread.id;
       }
 
-      const res = await fetch(`${API_URL}/api/messages`, {
+      const res = await apiFetch("/api/messages", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
 
@@ -631,7 +627,7 @@ export default function App() {
 
   const handleReaction = async (postId) => {
     try {
-      const res = await fetch(`${API_URL}/api/posts/${postId}/react`, {
+      const res = await apiFetch(`/api/posts/${postId}/react`, {
         method: "POST"
       });
       const updated = await res.json();
@@ -643,7 +639,7 @@ export default function App() {
 
   const handleSave = async (postId) => {
     try {
-      const res = await fetch(`${API_URL}/api/posts/${postId}/save`, {
+      const res = await apiFetch(`/api/posts/${postId}/save`, {
         method: "POST"
       });
       const updated = await res.json();
@@ -658,10 +654,9 @@ export default function App() {
     if (!commentDraft.trim()) return;
 
     try {
-      const res = await fetch(`${API_URL}/api/posts/${postId}/comment`, {
+      const res = await apiFetch(`/api/posts/${postId}/comment`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ authorId: CURRENT_USER_ID, body: commentDraft })
+        body: JSON.stringify({ body: commentDraft })
       });
       const updated = await res.json();
       updatePostInFeed(updated);
@@ -688,10 +683,8 @@ export default function App() {
 
   const handleApply = async (jobId) => {
     try {
-      const res = await fetch(`${API_URL}/api/jobs/${jobId}/apply`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: CURRENT_USER_ID })
+      const res = await apiFetch(`/api/jobs/${jobId}/apply`, {
+        method: "POST"
       });
       const updatedJob = await res.json();
       setJobs((prev) => prev.map((job) => (job.id === jobId ? updatedJob : job)));
@@ -703,10 +696,8 @@ export default function App() {
 
   const handleFollowCompany = async (companyId) => {
     try {
-      const res = await fetch(`${API_URL}/api/companies/${companyId}/follow`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: CURRENT_USER_ID })
+      const res = await apiFetch(`/api/companies/${companyId}/follow`, {
+        method: "POST"
       });
       const updatedCompany = await res.json();
       setCompanies((prev) =>
@@ -720,10 +711,8 @@ export default function App() {
 
   const handleJoinGroup = async (groupId) => {
     try {
-      const res = await fetch(`${API_URL}/api/groups/${groupId}/join`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: CURRENT_USER_ID })
+      const res = await apiFetch(`/api/groups/${groupId}/join`, {
+        method: "POST"
       });
       const updatedGroup = await res.json();
       setGroups((prev) => prev.map((group) => (group.id === groupId ? updatedGroup : group)));
@@ -735,7 +724,7 @@ export default function App() {
 
   const handleNotificationRead = async (noteId) => {
     try {
-      const res = await fetch(`${API_URL}/api/notifications/${noteId}/read`, {
+      const res = await apiFetch(`/api/notifications/${noteId}/read`, {
         method: "POST"
       });
       const updated = await res.json();
@@ -768,11 +757,9 @@ export default function App() {
 
     try {
       if (modal === "invite") {
-        const res = await fetch(`${API_URL}/api/invites`, {
+        const res = await apiFetch("/api/invites", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            fromId: CURRENT_USER_ID,
             target: modalForm.target
           })
         });
@@ -781,14 +768,12 @@ export default function App() {
       }
 
       if (modal === "group") {
-        const res = await fetch(`${API_URL}/api/groups`, {
+        const res = await apiFetch("/api/groups", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             name: modalForm.name,
             description: modalForm.description,
-            mode: modalForm.mode,
-            creatorId: CURRENT_USER_ID
+            mode: modalForm.mode
           })
         });
         const newGroup = await res.json();
@@ -797,9 +782,8 @@ export default function App() {
       }
 
       if (modal === "event") {
-        const res = await fetch(`${API_URL}/api/events`, {
+        const res = await apiFetch("/api/events", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             title: modalForm.title,
             detail: modalForm.detail,
@@ -812,13 +796,11 @@ export default function App() {
       }
 
       if (modal === "room") {
-        const res = await fetch(`${API_URL}/api/rooms`, {
+        const res = await apiFetch("/api/rooms", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             title: modalForm.title,
-            mode: modalForm.mode,
-            hostId: CURRENT_USER_ID
+            mode: modalForm.mode
           })
         });
         const newRoom = await res.json();
@@ -834,16 +816,190 @@ export default function App() {
   const jobsWithStatus = useMemo(() => {
     return jobs.map((job) => ({
       ...job,
-      applied: job.appliedBy?.includes(CURRENT_USER_ID) || job.applied
+      applied: job.appliedBy?.includes(userId) || job.applied
     }));
-  }, [jobs]);
+  }, [jobs, userId]);
 
   const companiesWithStatus = useMemo(() => {
     return companies.map((company) => ({
       ...company,
-      following: company.followersBy?.includes(CURRENT_USER_ID)
+      following: company.followersBy?.includes(userId)
     }));
-  }, [companies]);
+  }, [companies, userId]);
+
+  const handleLogin = async () => {
+    setAuthError("");
+    try {
+      const res = await fetch(`${API_URL}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: authForm.email,
+          password: authForm.password
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        setAuthError(data.error || "Login failed");
+        return;
+      }
+
+      const nextAuth = { token: data.token, user: data.user };
+      setAuth(nextAuth);
+      localStorage.setItem("peepin_auth", JSON.stringify(nextAuth));
+      setAuthForm({ name: "", handle: "", email: "", password: "", mode: "pro" });
+    } catch (err) {
+      setAuthError("Login failed");
+    }
+  };
+
+  const handleRegister = async () => {
+    setAuthError("");
+    try {
+      const res = await fetch(`${API_URL}/api/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: authForm.name,
+          handle: authForm.handle,
+          email: authForm.email,
+          password: authForm.password,
+          mode: authForm.mode
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        setAuthError(data.error || "Registration failed");
+        return;
+      }
+
+      const nextAuth = { token: data.token, user: data.user };
+      setAuth(nextAuth);
+      localStorage.setItem("peepin_auth", JSON.stringify(nextAuth));
+      setAuthForm({ name: "", handle: "", email: "", password: "", mode: "pro" });
+    } catch (err) {
+      setAuthError("Registration failed");
+    }
+  };
+
+  const handleLogout = async () => {
+    if (locationEnabled) {
+      await apiFetch("/api/location", {
+        method: "POST",
+        body: JSON.stringify({ share: false })
+      });
+    }
+    setLocationEnabled(false);
+    setAuth(null);
+    localStorage.removeItem("peepin_auth");
+  };
+
+  const handleToggleLocation = async () => {
+    if (locationEnabled) {
+      setLocationEnabled(false);
+      await apiFetch("/api/location", {
+        method: "POST",
+        body: JSON.stringify({ share: false })
+      });
+      return;
+    }
+
+    setLocationEnabled(true);
+  };
+
+  if (!auth?.token) {
+    return (
+      <div className="app auth-screen" style={themeStyle}>
+        <div className="auth-card">
+          <div className="logo">
+            <span className="logo-mark">P</span>
+            <div>
+              <h1>peepin</h1>
+              <p>three modes, one circle</p>
+            </div>
+          </div>
+          <h2>Sign in to continue</h2>
+          <p className="muted">
+            Use the demo account or create a new profile.
+          </p>
+          <div className="auth-toggle">
+            <button
+              className={authView === "login" ? "solid" : "ghost"}
+              onClick={() => setAuthView("login")}
+            >
+              Login
+            </button>
+            <button
+              className={authView === "register" ? "solid" : "ghost"}
+              onClick={() => setAuthView("register")}
+            >
+              Register
+            </button>
+          </div>
+          {authView === "register" && (
+            <div className="auth-fields">
+              <input
+                type="text"
+                placeholder="Full name"
+                value={authForm.name}
+                onChange={(event) =>
+                  setAuthForm((prev) => ({ ...prev, name: event.target.value }))
+                }
+              />
+              <input
+                type="text"
+                placeholder="Handle"
+                value={authForm.handle}
+                onChange={(event) =>
+                  setAuthForm((prev) => ({ ...prev, handle: event.target.value }))
+                }
+              />
+              <select
+                value={authForm.mode}
+                onChange={(event) =>
+                  setAuthForm((prev) => ({ ...prev, mode: event.target.value }))
+                }
+              >
+                <option value="pro">Pro</option>
+                <option value="social">Social</option>
+                <option value="private">Private</option>
+              </select>
+            </div>
+          )}
+          <div className="auth-fields">
+            <input
+              type="email"
+              placeholder="Email"
+              value={authForm.email}
+              onChange={(event) =>
+                setAuthForm((prev) => ({ ...prev, email: event.target.value }))
+              }
+            />
+            <input
+              type="password"
+              placeholder="Password"
+              value={authForm.password}
+              onChange={(event) =>
+                setAuthForm((prev) => ({ ...prev, password: event.target.value }))
+              }
+            />
+          </div>
+          {authError ? <p className="error">{authError}</p> : null}
+          <button
+            className="solid"
+            onClick={authView === "login" ? handleLogin : handleRegister}
+          >
+            {authView === "login" ? "Login" : "Create account"}
+          </button>
+          <p className="muted auth-note">
+            Demo: avery@peepin.com, mila@peepin.com, rohan@peepin.com (password peepin123)
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app" style={themeStyle} data-mode={mode}>
@@ -872,6 +1028,7 @@ export default function App() {
         </nav>
         <div className="top-actions">
           <button className="ghost" onClick={() => openModal("invite")}>Invite</button>
+          <button className="ghost" onClick={handleLogout}>Log out</button>
           <button className="solid" onClick={goToComposer}>New post</button>
         </div>
       </header>
@@ -887,7 +1044,7 @@ export default function App() {
             <button className="solid" onClick={goToComposer}>Create a post</button>
             <button
               className="ghost"
-              onClick={() => handleShare(buildShareLink(`/profile/${CURRENT_USER_ID}`))}
+              onClick={() => handleShare(buildShareLink(`/profile/${userId}`))}
             >
               Share your profile
             </button>
@@ -968,7 +1125,7 @@ export default function App() {
               <p className="muted">No groups yet.</p>
             ) : (
               groups.map((group) => {
-                const isMember = group.members?.includes(CURRENT_USER_ID);
+                const isMember = group.members?.includes(userId);
                 return (
                   <div className="group-row" key={group.id}>
                     <img src={group.avatar} alt={group.name} />
@@ -1220,7 +1377,7 @@ export default function App() {
                     <div className="radar-header">
                       <h3>NearMe radar</h3>
                       <span className="status-pill">
-                        {precision ? "Bluetooth precision" : "GPS"}
+                        {precision ? "High precision" : "Standard"}
                       </span>
                     </div>
                     <div className="radar">
@@ -1264,42 +1421,31 @@ export default function App() {
                     <div className="control-row">
                       <button
                         className={locationEnabled ? "solid" : "ghost"}
-                        onClick={() => setLocationEnabled((value) => !value)}
+                        onClick={handleToggleLocation}
                       >
-                        GPS {locationEnabled ? "On" : "Off"}
+                        Share location {locationEnabled ? "On" : "Off"}
                       </button>
                       <button
                         className={precision ? "solid" : "ghost"}
                         onClick={() => setPrecision((value) => !value)}
                       >
-                        Bluetooth {precision ? "On" : "Off"}
-                      </button>
-                      <button
-                        className={useDemoLocation ? "solid" : "ghost"}
-                        onClick={() => setUseDemoLocation((value) => !value)}
-                      >
-                        Demo {useDemoLocation ? "On" : "Off"}
-                      </button>
-                    </div>
-                    <div className="control-row">
-                      <button
-                        className="ghost"
-                        onClick={() => setDemoIndex((value) => (value + 1) % demoLocations.length)}
-                      >
-                        Switch spot
-                      </button>
-                      <button className="ghost" onClick={() => setTick((value) => value + 1)}>
-                        Ping now
+                        High precision {precision ? "On" : "Off"}
                       </button>
                     </div>
                     <p className="muted status-line">{locationStatus}</p>
+                    <p className="muted status-line">
+                      High precision uses GPS and WiFi. Bluetooth beacons require a mobile app.
+                    </p>
+                    <p className="muted status-line">
+                      Tip: use different accounts on each device to see each other.
+                    </p>
                   </div>
 
                   <div className="card nearby-list">
                     <h3>Nearby people</h3>
                     {nearbyProfiles.length === 0 ? (
                       <p className="muted">
-                        No one nearby. Toggle demo mode or enable GPS to see nearby profiles.
+                        No one nearby yet. Turn on location sharing to surface profiles.
                       </p>
                     ) : (
                       nearbyProfiles.map((profile) => (
@@ -1315,9 +1461,9 @@ export default function App() {
                             </span>
                           </div>
                           <div className="nearby-meta">
-                            <span className={`status-pill ${profile.status}`}>{
-                              profile.status === "nearby" ? "Live" : "Recent"
-                            }</span>
+                            <span className={`status-pill ${profile.status}`}>
+                              {profile.status === "nearby" ? "Live" : "Recent"}
+                            </span>
                             <strong>{(profile.distance / 1000).toFixed(1)} km</strong>
                             <button
                               className="ghost"
@@ -1452,9 +1598,7 @@ export default function App() {
                           {threadMessages.map((msg) => (
                             <div
                               key={msg.id}
-                              className={
-                                msg.fromId === CURRENT_USER_ID ? "bubble mine" : "bubble"
-                              }
+                              className={msg.fromId === userId ? "bubble mine" : "bubble"}
                             >
                               <p>{msg.body}</p>
                               <small>{formatDateTime(msg.createdAt)}</small>

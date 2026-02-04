@@ -13,6 +13,7 @@ const adapter = new JSONFile(file);
 
 const defaultData = {
   users: [],
+  accounts: [],
   posts: [],
   messages: [],
   connections: [],
@@ -28,6 +29,7 @@ const defaultData = {
   recommendations: [],
   rooms: [],
   invites: [],
+  locations: [],
   meta: {
     currentUserId: null
   }
@@ -43,6 +45,7 @@ export async function initDb() {
   await db.read();
   db.data ||= structuredClone(defaultData);
   db.data.users ||= [];
+  db.data.accounts ||= [];
   db.data.posts ||= [];
   db.data.messages ||= [];
   db.data.connections ||= [];
@@ -58,6 +61,7 @@ export async function initDb() {
   db.data.recommendations ||= [];
   db.data.rooms ||= [];
   db.data.invites ||= [];
+  db.data.locations ||= [];
   db.data.meta ||= { currentUserId: null };
   await db.write();
 }
@@ -66,6 +70,7 @@ export async function readDb() {
   await db.read();
   db.data ||= structuredClone(defaultData);
   db.data.users ||= [];
+  db.data.accounts ||= [];
   db.data.posts ||= [];
   db.data.messages ||= [];
   db.data.connections ||= [];
@@ -81,5 +86,6 @@ export async function readDb() {
   db.data.recommendations ||= [];
   db.data.rooms ||= [];
   db.data.invites ||= [];
+  db.data.locations ||= [];
   db.data.meta ||= { currentUserId: null };
 }
