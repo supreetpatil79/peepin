@@ -994,7 +994,8 @@ export default function App() {
             {authView === "login" ? "Login" : "Create account"}
           </button>
           <p className="muted auth-note">
-            Demo: avery@peepin.com, mila@peepin.com, rohan@peepin.com (password peepin123)
+            Demo: avery@peepin.com, mila@peepin.com, rohan@peepin.com,
+            skylar@peepin.com, lena@peepin.com (password peepin123)
           </p>
         </div>
       </div>

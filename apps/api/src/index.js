@@ -55,15 +55,60 @@ db.data.users.forEach((user, index) => {
   }
 });
 
-if (db.data.accounts.length === 0 && db.data.users.length > 0) {
-  const passwordHash = bcrypt.hashSync("peepin123", 10);
-  db.data.accounts = db.data.users.map((user) => ({
-    id: `acct_${nanoid(6)}`,
-    userId: user.id,
-    email: `${user.handle.replace(/\./g, "")}@peepin.com`,
-    passwordHash
-  }));
-  patched = true;
+const demoAccounts = [
+  { handle: "avery.chen", email: "avery@peepin.com" },
+  { handle: "mila.ortiz", email: "mila@peepin.com" },
+  { handle: "rohan.patel", email: "rohan@peepin.com" },
+  { handle: "sky.nguyen", email: "skylar@peepin.com" },
+  { handle: "lena.park", email: "lena@peepin.com" }
+];
+
+const demoPasswordHash = bcrypt.hashSync("peepin123", 10);
+
+demoAccounts.forEach(({ handle, email }) => {
+  const user = db.data.users.find((item) => item.handle === handle);
+  if (!user) return;
+
+  const existingByEmail = db.data.accounts.find((account) => account.email === email);
+
+  if (!existingByEmail) {
+    db.data.accounts.push({
+      id: `acct_${nanoid(6)}`,
+      userId: user.id,
+      email,
+      passwordHash: demoPasswordHash
+    });
+    patched = true;
+  } else if (existingByEmail.passwordHash !== demoPasswordHash) {
+    existingByEmail.passwordHash = demoPasswordHash;
+    patched = true;
+  }
+});
+
+if (db.data.users.length > 0) {
+  db.data.users.forEach((user) => {
+    const existing = db.data.accounts.find((account) => account.userId === user.id);
+    if (existing) return;
+
+    const base =
+      user.handle?.split(".")[0]?.toLowerCase() ||
+      user.name?.split(" ")[0]?.toLowerCase() ||
+      "user";
+    let email = `${base}@peepin.com`;
+    let counter = 1;
+    while (db.data.accounts.some((account) => account.email === email)) {
+      email = `${base}${counter}@peepin.com`;
+      counter += 1;
+    }
+
+    db.data.accounts.push({
+      id: `acct_${nanoid(6)}`,
+      userId: user.id,
+      email,
+      passwordHash: demoPasswordHash
+    });
+    patched = true;
+  });
 }
 
 db.data.posts.forEach((post) => {
