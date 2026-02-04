@@ -39,7 +39,9 @@ npm run dev
 ## Production hosting
 
 - Frontend: Vercel (set Root Directory to `apps/web`).
-- API: Any Docker-capable host (Render/Fly/Railway). Set these env vars:
-  - `PORT=4000`
-  - `DATA_DIR=/data` (mount a persistent disk at `/data` on the host)
-  - `CORS_ORIGIN=https://your-vercel-domain` (comma-separated allowed origins)
+- API: Render (Blueprint file `render.yaml` included).
+  - Set Root Directory to `apps/api` if deploying manually.
+  - Ensure env vars:
+    - `PORT=4000`
+    - `DATA_DIR=/data` (mount a persistent disk at `/data`)
+    - `CORS_ORIGIN=https://peepin.vercel.app` (comma-separated allowed origins)

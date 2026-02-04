@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: peepin-api
+    runtime: node
+    plan: starter
+    region: oregon
+    rootDir: apps/api
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 4000
+      - key: DATA_DIR
+        value: /data
+      - key: CORS_ORIGIN
+        value: https://peepin.vercel.app
+    disk:
+      name: peepin-data
+      mountPath: /data
+      sizeGB: 1
